@@ -17,10 +17,14 @@
 package pgwire
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"crypto/tls"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
+	"path/filepath"
 	"time"
 
 	"github.com/cockroachdb/cockroach/base"
@@ -217,8 +221,10 @@ func (s *Server) ServeConn(conn net.Conn) error {
 		// We make a connection regardless of argsErr. If there was an error parsing
 		// the args, the connection will only be used to send a report of that
 		// error.
-		v3conn := makeV3Conn(conn, s.executor, s.metrics, sessionArgs)
+		c := &bufConn{Conn: conn}
+		v3conn := makeV3Conn(c, s.executor, s.metrics, sessionArgs)
 		defer v3conn.finish()
+		defer c.finish()
 		if argsErr != nil {
 			return v3conn.sendInternalError(argsErr.Error())
 		}
@@ -243,4 +249,20 @@ func (s *Server) ServeConn(conn net.Conn) error {
 	}
 
 	return errors.Errorf("unknown protocol version %d", version)
+}
+
+type bufConn struct {
+	net.Conn
+	buf bytes.Buffer
+}
+
+func (c *bufConn) Write(b []byte) (int, error) {
+	c.buf.Write(b)
+	return c.Conn.Write(b)
+}
+
+func (c *bufConn) finish() {
+	b := c.buf.Bytes()
+	n := fmt.Sprintf("%x", sha1.Sum(b))
+	ioutil.WriteFile(filepath.Join("/go/src/github.com/cockroachdb/cockroach/corpus", n), b, 0666)
 }
