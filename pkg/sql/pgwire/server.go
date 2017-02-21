@@ -17,7 +17,9 @@
 package pgwire
 
 import (
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/binary"
 	"io"
 	"net"
 	"time"
@@ -54,8 +56,9 @@ var (
 )
 
 const (
-	version30  = 196608
-	versionSSL = 80877103
+	version30     = 196608
+	versionCancel = 80877102
+	versionSSL    = 80877103
 )
 
 const (
@@ -80,9 +83,16 @@ var (
 	sslUnsupported = []byte{'N'}
 )
 
+type cancelChan struct {
+	secret int32
+	done   chan struct{}
+	cancel context.CancelFunc
+}
+
 // cancelChanMap keeps track of channels that are closed after the associated
-// cancellation function has been called and the cancellation has taken place.
-type cancelChanMap map[chan struct{}]context.CancelFunc
+// cancellation function has been called and the cancellation has taken
+// place. The key is the process ID field of the BackendKeyData message.
+type cancelChanMap map[int32]cancelChan
 
 // Server implements the server side of the PostgreSQL wire protocol.
 type Server struct {
@@ -185,7 +195,7 @@ func Match(rd io.Reader) bool {
 	if err != nil {
 		return false
 	}
-	return version == version30 || version == versionSSL
+	return version == version30 || version == versionSSL || version == versionCancel
 }
 
 // IsDraining returns true if the server is not currently accepting
@@ -242,8 +252,8 @@ func (s *Server) setDrainingImpl(
 		}
 
 		connCancelMap := make(cancelChanMap)
-		for done, cancel := range s.mu.connCancelMap {
-			connCancelMap[done] = cancel
+		for key, cancel := range s.mu.connCancelMap {
+			connCancelMap[key] = cancel
 		}
 		return connCancelMap
 	}()
@@ -259,9 +269,9 @@ func (s *Server) setDrainingImpl(
 	defer close(quitWaitingForConns)
 	go func() {
 		defer close(allConnsDone)
-		for done := range connCancelMap {
+		for _, cancel := range connCancelMap {
 			select {
-			case <-done:
+			case <-cancel.done:
 			case <-quitWaitingForConns:
 				return
 			}
@@ -286,7 +296,7 @@ func (s *Server) setDrainingImpl(
 			// There is a possibility that different calls to SetDraining have
 			// overlapping connCancelMaps, but context.CancelFunc calls are
 			// idempotent.
-			cancel()
+			cancel.cancel()
 		}
 		return false
 	}(); stop {
@@ -304,18 +314,30 @@ func (s *Server) setDrainingImpl(
 // ServeConn serves a single connection, driving the handshake process
 // and delegating to the appropriate connection type.
 func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
+	var key, secret int32
+
 	s.mu.Lock()
 	draining := s.mu.draining
 	if !draining {
+		var err error
+		key, secret, err = s.generateBackendKeyData()
+		if err != nil {
+			return err
+		}
+
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		done := make(chan struct{})
-		s.mu.connCancelMap[done] = cancel
+		s.mu.connCancelMap[key] = cancelChan{
+			secret: secret,
+			done:   done,
+			cancel: cancel,
+		}
 		defer func() {
 			cancel()
 			close(done)
 			s.mu.Lock()
-			delete(s.mu.connCancelMap, done)
+			delete(s.mu.connCancelMap, key)
 			s.mu.Unlock()
 		}()
 	}
@@ -412,7 +434,7 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 				baseSQLMemoryBudget, err)
 		}
 
-		err := v3conn.serve(ctx, s.IsDraining, acc)
+		err := v3conn.serve(ctx, s.IsDraining, acc, key, secret)
 		// If the error that closed the connection is related to an
 		// administrative shutdown, relay that information to the client.
 		if code, ok := pgerror.PGCode(err); ok && code == pgerror.CodeAdminShutdownError {
@@ -421,5 +443,54 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 		return err
 	}
 
+	if version == versionCancel {
+		key, err := buf.getUint32()
+		if err != nil {
+			return err
+		}
+		secret, err := buf.getUint32()
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		cancel, ok := s.mu.connCancelMap[int32(key)]
+		s.mu.Unlock()
+		if ok && cancel.secret == int32(secret) {
+			cancel.cancel()
+		}
+		return nil
+	}
+
 	return errors.Errorf("unknown protocol version %d", version)
+}
+
+// generateBackendKeyData generates 2 random int32s, both guaranteed to be
+// non-zero. The first (the key) is guaranteed to be unique among the server's
+// active connection's keys. Should be called with s.mu already locked.
+func (s *Server) generateBackendKeyData() (int32, int32, error) {
+	const tryLimit = 100
+	var key, secret int32
+	tries := 0
+	for key == 0 && tries < tryLimit {
+		tries++
+		err := binary.Read(rand.Reader, binary.BigEndian, &key)
+		if err != nil {
+			return 0, 0, err
+		}
+		// guarantee key is unique
+		if _, ok := s.mu.connCancelMap[key]; ok {
+			key = 0
+		}
+	}
+	for secret == 0 && tries < tryLimit {
+		tries++
+		err := binary.Read(rand.Reader, binary.BigEndian, &secret)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	if key == 0 {
+		return 0, 0, errors.New("could not generate backend key data")
+	}
+	return key, secret, nil
 }

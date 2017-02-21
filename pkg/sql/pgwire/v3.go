@@ -62,6 +62,7 @@ const (
 	clientMsgTerminate   clientMessageType = 'X'
 
 	serverMsgAuth                 serverMessageType = 'R'
+	serverMsgBackendKeyData       serverMessageType = 'K'
 	serverMsgBindComplete         serverMessageType = '2'
 	serverMsgCommandComplete      serverMessageType = 'C'
 	serverMsgCloseComplete        serverMessageType = '3'
@@ -316,7 +317,7 @@ func (c *v3Conn) closeSession(ctx context.Context) {
 	c.session = nil
 }
 
-func (c *v3Conn) serve(ctx context.Context, draining func() bool, reserved mon.BoundAccount) error {
+func (c *v3Conn) serve(ctx context.Context, draining func() bool, reserved mon.BoundAccount, key, secret int32) error {
 	for key, value := range statusReportParams {
 		c.writeBuf.initMsg(serverMsgParameterStatus)
 		c.writeBuf.writeTerminatedString(key)
@@ -360,6 +361,19 @@ func (c *v3Conn) serve(ctx context.Context, draining func() bool, reserved mon.B
 		return nil
 	})
 	c.rd = bufio.NewReader(c.conn)
+
+	// The key will be 0 if the connection is draining.
+	if key != 0 {
+		c.writeBuf.initMsg(serverMsgBackendKeyData)
+		c.writeBuf.putInt32(key)
+		c.writeBuf.putInt32(secret)
+		if err := c.writeBuf.finishMsg(c.wr); err != nil {
+			return err
+		}
+		if err := c.wr.Flush(); err != nil {
+			return err
+		}
+	}
 
 	for {
 		if !c.doingExtendedQueryMessage {
