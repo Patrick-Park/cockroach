@@ -1,0 +1,1 @@
+./build/builder.sh make bench TESTTIMEOUT=4h PKG=./pkg/ccl/acceptanceccl BENCHES=BenchmarkRestoreBig TESTFLAGS='-v -benchtime 1s -remote -key-name google_compute_engine -cwd ../../acceptance/terraform/gce -tf.keep-cluster=always'
