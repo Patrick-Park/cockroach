@@ -284,3 +284,15 @@ func TestAsOfRetry(t *testing.T) {
 		t.Fatalf("unexpected val: %v", i)
 	}
 }
+
+func TestCRDB(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	params, _ := createTestServerParams()
+	s, db, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop()
+
+	if _, err := db.Query("SELECT * FROM crdb_internal.ranges"); err != nil {
+		t.Fatal(err)
+	}
+}

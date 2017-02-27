@@ -17,8 +17,11 @@
 package sql
 
 import (
+	"fmt"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
@@ -26,9 +29,10 @@ import (
 var crdbInternal = virtualSchema{
 	name: "crdb_internal",
 	tables: []virtualSchemaTable{
-		crdbInternalTablesTable,
 		crdbInternalLeasesTable,
+		crdbInternalRangesTable,
 		crdbInternalSchemaChangesTable,
+		crdbInternalTablesTable,
 	},
 }
 
@@ -197,6 +201,46 @@ CREATE TABLE crdb_internal.leases (
 			if err := adder(); err != nil {
 				return err
 			}
+		}
+		return nil
+	},
+}
+
+var crdbInternalRangesTable = virtualSchemaTable{
+	schema: `
+CREATE TABLE crdb_internal.ranges (
+  TABLE_ID                 INT NOT NULL,
+  PARENT_ID                INT NOT NULL,
+  NAME                     STRING NOT NULL
+);
+`,
+	populate: func(p *planner, addRow func(...parser.Datum) error) error {
+		descs, err := p.getAllDescriptors()
+		if err != nil {
+			return err
+		}
+		// Note: we do not use forEachTableDesc() here because we want to
+		// include added and dropped descriptors.
+		b := p.txn.NewBatch()
+		for _, desc := range descs {
+			table, ok := desc.(*sqlbase.TableDescriptor)
+			if !ok || !userCanSeeDescriptor(table, p.session.User) {
+				continue
+			}
+			prefix := keys.MakeTablePrefix(uint32(table.ID))
+			k := roachpb.RKey(prefix)
+			m := keys.RangeMetaKey(k)
+			e := m.PrefixEnd()
+			//fmt.Println(table.Name, table.ID, keys.PrettyPrint(k), keys.PrettyPrint(m))
+			fmt.Println("ADDING", keys.PrettyPrint(m), keys.PrettyPrint(e), table.Name)
+			b.Scan(m, e)
+		}
+		if err := p.txn.Run(b); err != nil {
+			fmt.Println("ERR", err)
+			return err
+		}
+		for i, r := range b.Results {
+			fmt.Println(i, r.Err, len(r.Rows), len(r.Keys), len(r.RangeInfos))
 		}
 		return nil
 	},
