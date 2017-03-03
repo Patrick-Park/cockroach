@@ -3120,6 +3120,10 @@ opt_as_of_clause:
   {
     $$.val = AsOfClause{Expr: $5.expr()}
   }
+| AS_LA OF SYSTEM TIME PLACEHOLDER
+  {
+    $$.val = AsOfClause{Expr: NewPlaceholder($5)}
+  }
 | /* EMPTY */
   {
     $$.val = AsOfClause{}

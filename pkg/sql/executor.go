@@ -1563,10 +1563,10 @@ func makeResultColumns(colDescs []sqlbase.ColumnDescriptor) ResultColumns {
 // EvalAsOfTimestamp evaluates and returns the timestamp from an AS OF SYSTEM
 // TIME clause.
 func EvalAsOfTimestamp(
-	evalCtx *parser.EvalContext, asOf parser.AsOfClause, max hlc.Timestamp,
+	evalCtx *parser.EvalContext, semaCtx *parser.SemaContext, asOf parser.AsOfClause, max hlc.Timestamp,
 ) (hlc.Timestamp, error) {
 	var ts hlc.Timestamp
-	te, err := asOf.Expr.TypeCheck(nil, parser.TypeString)
+	te, err := asOf.Expr.TypeCheck(semaCtx, parser.TypeString)
 	if err != nil {
 		return hlc.Timestamp{}, err
 	}
@@ -1643,7 +1643,11 @@ func isAsOf(planMaker *planner, stmt parser.Statement, max hlc.Timestamp) (*hlc.
 		return nil, nil
 	}
 
-	ts, err := EvalAsOfTimestamp(&planMaker.evalCtx, sc.From.AsOf, max)
+	if p, ok := sc.From.AsOf.Expr.(*parser.Placeholder); ok {
+
+	}
+
+	ts, err := EvalAsOfTimestamp(&planMaker.evalCtx, &planMaker.semaCtx, sc.From.AsOf, max)
 	return &ts, err
 }
 

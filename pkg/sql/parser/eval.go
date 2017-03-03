@@ -22,6 +22,7 @@ import (
 	"math"
 	"math/big"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -2736,6 +2737,7 @@ func (t *DOidWrapper) Eval(_ *EvalContext) (Datum, error) {
 
 // Eval implements the TypedExpr interface.
 func (node *Placeholder) Eval(_ *EvalContext) (Datum, error) {
+	debug.PrintStack()
 	return nil, fmt.Errorf("no value provided for placeholder: $%s", node.Name)
 }
 

@@ -185,6 +185,10 @@ func TestAsOfTime(t *testing.T) {
 	} else if !testutils.IsError(err, "pq: unexpected AS OF SYSTEM TIME") {
 		t.Fatal(err)
 	}
+
+	if _, err := db.Query("SELECT a FROM d.t AS OF SYSTEM TIME $1", tsVal1); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Test that a TransactionRetryError will retry the read until it succeeds. The
