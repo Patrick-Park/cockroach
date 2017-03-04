@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/url"
 	"os"
 	"os/exec"
@@ -38,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/docs/generate/yacc"
 	"github.com/spf13/cobra"
 )
 
@@ -538,6 +540,58 @@ func endsWithIncompleteTxn(stmts parser.StatementList) bool {
 
 var cmdHistFile = envutil.EnvOrDefaultString("COCKROACH_SQL_CLI_HISTORY", ".cockroachdb_history")
 
+var yaccTree *yacc.Tree
+var prods = map[string]*yacc.ProductionNode{}
+
+func init() {
+	const fname = "/home/mjibson/src/github.com/cockroachdb/cockroach/pkg/sql/parser/sql.y"
+	b, err := ioutil.ReadFile(fname)
+	if err != nil {
+		panic(err)
+	}
+	yaccTree, err = yacc.Parse(fname, string(b))
+	if err != nil {
+		panic(err)
+	}
+	for _, p := range yaccTree.Productions {
+		prods[p.Name] = p
+	}
+}
+
+// Do implements the readline.AutoCompleter interface.
+func (c *cliState) Do(line []rune, pos int) (newLine [][]rune, length int) {
+	sc := parser.MakeScanner(string(line), c.syntax)
+	var exprs [][]yacc.Item
+	for _, e := range prods["stmt_list"].Expressions {
+		exprs = append(exprs, e.Items)
+	}
+	sc.Tokens(func(t int) {
+		seen := map[string]bool{}
+		for i := 0; i < len(exprs); i++ {
+			items := exprs[i]
+			if len(items) == 0 {
+				continue
+			}
+			item := items[0]
+			switch item.Typ {
+			case yacc.TypToken:
+				fmt.Println("TOKEN", item.Value)
+				if !seen[item.Value] {
+					seen[item.Value] = true
+					for _, is := range prods[item.Value].Expressions {
+						exprs = append(exprs, is.Items)
+					}
+				}
+			case yacc.TypLiteral:
+				fmt.Println(item.Value)
+			default:
+				panic(item.Typ)
+			}
+		}
+	})
+	return nil, 0
+}
+
 func (c *cliState) doStart(nextState cliStateEnum) cliStateEnum {
 	// Common initialization.
 	c.syntax = parser.Traditional
@@ -561,12 +615,12 @@ func (c *cliState) doStart(nextState cliStateEnum) cliStateEnum {
 			cfg := c.ins.Config.Clone()
 			cfg.HistoryFile = histFile
 			cfg.HistorySearchFold = true
+			cfg.AutoComplete = c
 			c.ins.SetConfig(cfg)
 		}
 
 		// The user only gets to see the info screen on interactive session.
 		fmt.Print(infoMessage)
-
 		c.checkSyntax = true
 		c.normalizeHistory = true
 		c.errExit = false
